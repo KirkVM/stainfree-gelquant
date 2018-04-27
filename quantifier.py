@@ -39,8 +39,8 @@ def read_gelbandfile(lbfpath,linfodf):
         lbdfHT[lbdf['Lane'].iat[0]]=lbdf
     return lbdfHT
 
-def readin():
-    with open("fileconfigs.yml","r") as f:
+def readin(configfname="fileconfigs.yml"):
+    with open(configfname,"r") as f:
         xlfpathinfo=yaml.load(f)
     lbfpath=os.path.join(xlfpathinfo['laneband_basepath'],
             xlfpathinfo['laneband_fldr'],xlfpathinfo['laneband_fname'])
