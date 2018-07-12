@@ -1,10 +1,11 @@
 name: gquantenv
-
+channels:
+- defaults
 dependencies:
-  - python=3.6
-  - pandas
-  - numpy
-  - pyyaml
-  - matplotlib
-  - xlrd
-  - scipy
+- python=3.6
+- pandas
+- numpy
+- pyyaml
+- matplotlib
+- xlrd
+- scipy
