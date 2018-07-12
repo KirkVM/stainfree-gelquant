@@ -1,7 +1,0 @@
-python=3.6
-pandas
-numpy
-pyyaml
-matplotlib
-xlrd
-scipy
