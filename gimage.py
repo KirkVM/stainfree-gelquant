@@ -55,7 +55,7 @@ def get_optrscutoff(gelimg):
     return lower_co
 
 
-def get_gelregions(gelimg):
+def get_gelbands(gelimg):
     el_map=skimage.filters.sobel_h(gelimg)
     el_map=skimage.img_as_float(el_map)/el_map.max()
     el_map=skimage.exposure.rescale_intensity(el_map,in_range=(0,0.1))
@@ -69,7 +69,6 @@ def get_gelregions(gelimg):
     labeled_peaks,_=ndi.label(peakseg)#ndi.binary_fill_holes(h))
     labeled_peaks=skimage.morphology.remove_small_objects(labeled_peaks,min_size=10)
     #rps=skimage.measure.regionprops(simple,coordinates='rc')
-
     #labeled_peaks=skimage.morphology.remove_small_holes(labeled_peaks,min_size=10)
     return labeled_peaks
 
