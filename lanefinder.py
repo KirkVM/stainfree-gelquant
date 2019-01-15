@@ -7,6 +7,7 @@ import skimage
 import networkx as nx
 from sklearn.linear_model import LinearRegression
 from operator import attrgetter
+from scipy import ndimage as ndi
 
 class gel:
     def __init__(self,gelimg:np.ndarray,peaklblimg,geltype:str="protein"):
@@ -41,6 +42,8 @@ class LaneCluster:
         self.gel=gelobj
         self.gbs=gbs
         self.csize=len(self.gbs)
+        self.pband=[]
+        self.lcprobimage=None
         for gb in self.gbs:
             centers.append(gb.rp.weighted_centroid)
             for coord in gb.rp.coords:
@@ -74,15 +77,140 @@ class LaneCluster:
         else:
             return None
 
+def get_bandspan(gb,prior_width=18,exspan=32,rdim=3,cdim=3):
+    gb.bprobspan=[]
+
+    ctr_row=int(gb.rp.weighted_centroid[0])
+    ctr_col=int(gb.rp.weighted_centroid[1])
+    ctrwindow=gb.intensityimage[ctr_row-int(rdim/2):ctr_row+int(rdim/2)+1,\
+                        ctr_col-int(cdim/2):ctr_col+int(cdim/2)+1]
+    ctrwindow_intensity=np.mean(ctrwindow)
+    osteps=np.array(range(-int(exspan/2),int(exspan/2)+1) )
+    prior_logistic=1-np.power(1.7,np.abs(osteps)-prior_width/2)/(1+np.power(1.7,np.abs(osteps)-prior_width/2))
+    for spos,ostep in enumerate(osteps):
+        deltarc=gb.norm_ict*ostep
+        rcpair=np.array(gb.rp.weighted_centroid)+deltarc
+        imgwindow=gb.intensityimage[int(rcpair[0])-int(rdim/2):int(rcpair[0])+int(rdim/2)+1,\
+                        int(rcpair[1])-int(cdim/2):int(rcpair[1])+int(cdim/2)+1]
+        wdw_mean=np.mean(imgwindow)
+        pdata_inlane=min(1.0,wdw_mean/ctrwindow_intensity)
+        numy=pdata_inlane*(0.05+0.95*prior_logistic[spos])
+        gb.bprobspan.append([rcpair,numy])
+        
+
+def infer_bandwidths(gb1,gb2):
+    region_image=np.zeros_like(gb1.intensityimage)
+    prob_image=np.zeros_like(gb1.intensityimage)
+    for bprob1,bprob2 in zip(gb1.bprobspan,gb2.bprobspan):
+        rc1int=bprob1[0].astype(int)
+        rc2int=bprob2[0].astype(int)
+        connect_reg=LinearRegression().fit(np.reshape(np.array([rc1int[0],rc2int[0]]),(2,1)),
+                                           np.reshape(np.array([rc1int[1],rc2int[1]]),(2,1)))
+        for rval in range(rc1int[0]+1,rc2int[0]):
+            cval=int(connect_reg.intercept_+connect_reg.coef_[0]*rval)
+            region_image[rval,cval]=1
+        region_image[rc1int[0],rc1int[1]]=1
+        region_image[rc2int[0],rc2int[1]]=1
+    #to fill in holes...
+    region_image=ndi.binary_fill_holes(region_image)
+    for bprob1,bprob2 in zip(gb1.bprobspan,gb2.bprobspan):
+        rc1int=bprob1[0].astype(int)
+        rc2int=bprob2[0].astype(int)
+        region_image[rc1int[0],rc1int[1]]=0
+        region_image[rc2int[0],rc2int[1]]=0
+    labeled_peaks,_=ndi.label(region_image,structure=[[1,1,1],[1,1,1],[1,1,1]])
+    rirp=skimage.measure.regionprops(labeled_peaks)
+    #now fill in prop. to distance to each prob_band
+    gb1pband_coords=[x[0] for x in gb1.bprobspan]
+    gb2pband_coords=[x[0] for x in gb2.bprobspan]
+    for rc in rirp[0].coords:
+        ds2pband1=[np.sqrt( (rc[0]-x[0])**2. + (rc[1]-x[1])**2.) for x in gb1pband_coords]
+        mindist_topband1=min(ds2pband1)
+        pband1_contribution=gb1.bprobspan[ds2pband1.index(mindist_topband1)][1]
+
+        ds2pband2=[np.sqrt( (rc[0]-x[0])**2. + (rc[1]-x[1])**2.) for x in gb2pband_coords]
+        mindist_topband2=min(ds2pband2)
+        pband2_contribution=gb2.bprobspan[ds2pband2.index(mindist_topband2)][1]
+
+        probval=pband1_contribution*(mindist_topband1/(mindist_topband1+mindist_topband2))
+        probval+=pband2_contribution*(mindist_topband2/(mindist_topband1+mindist_topband2))
+        prob_image[rc[0],rc[1]]=probval
+    return prob_image
+
 def new_def_lw(lcluster):
-    itensor=list(lc0.gbs)[0].rp.inertia_tensor
-    ict=np.linalg.norm(it[:,1]
-print(np.linalg.norm(ict/np.linalg.norm(ict)))
+    #order bands by row pos
+    lcbands=sorted(list(lcluster.gbs),key=lambda x:x.rp.weighted_centroid[0])#key=attrgetter('rp.weighted_centroid[0]'))
+    window_size=3 #3x3 windows
+    #get probability axis for band 1
+    get_bandspan(lcbands[0])
+    #for lcbidx in range(1,len(lcbands)):
+    allprobimage=np.zeros_like(lcbands[0].intensityimage)
+    for lcbidx in range(1,len(lcbands)):
+        get_bandspan(lcbands[lcbidx])
+        curprobimage=infer_bandwidths(lcbands[lcbidx-1],lcbands[lcbidx])
+        allprobimage+=curprobimage#.max(a,probimage)
+    for lcband in lcbands:
+        for rcp in lcband.bprobspan:
+            rcint=rcp[0].astype(int)
+            allprobimage[rcint[0],rcint[1]]=rcp[1]
+    return allprobimage
+
+    #for bands 2,...n, get probab axis, then infer band axis btwn
+
+
+def new_def_lws(lclusters):
+    probimage=np.zeros_like(list(lclusters[0].gbs)[0].intensityimage)
+    for lcluster in lclusters:
+        lcprobimage=new_def_lw(lcluster)
+        lcluster.lcprobimage=lcprobimage
+        probimage+=lcprobimage
+    probimage[probimage>1]=1
+    return probimage
+
+
+import scipy
+
+def lane_model(rvals,c0):#0):
+    #return c0#+(rvals-232)*crslope
+    return np.array([c0 for x in range(len(rvals))])#)#+(rvals-232)*crslope
+
+def l2_loss(tup, rvals, pbandimg):
+    x0 = tup[0]
+    predicted_cvals_int = lane_model(rvals,x0).astype(int)
     
-    logistic=1-np.power(1.7,x-9)/(1+np.power(1.7,x-9))
+    observed_prob_band=np.array([pbandimg[r,c] for r,c in zip(rvals,predicted_cvals_int) ])
+#    print(observed_prob_band)
+#   print(predicted_cvals_int)
+    delta= np.ones((len(observed_prob_band))) - observed_prob_band
+    #print(np.dot(delta,delta))
+    return np.dot(delta, delta)
+#    print(predicted_cvals_int)
+#    predicted_rcpairs=[np.array(r,c) for r,c in zip(rvals,predicted_cvals_int)]
+#    predicted_prob_band=np.array([1.0 for r,c in zip(rvals,predicted_cvals_int)])
+#    print(predicted_prob_band)
+ #   print([[rcpair[0],rcpair[1]] for rcpair in zip(rvals,predicted_cvals_int)])
 
+def lane_model_b(rvals,cstart,r0,crslope):#0):
+    #return c0#+(rvals-232)*crslope
+    predcols=cstart+(rvals-r0)*crslope
+    return predcols
+#    return np.array([c0 for x in range(len(rvals))])#)#+(rvals-232)*crslope
 
+def l2_loss_b(tup, all_rvals, pbandimg):
+    c0,r0,cstep,crslope= tup
+    all_deltas=[]
+    for lnum,lanerows in enumerate(all_rvals):
+        cstart=c0+lnum*cstep
+        predicted_cvals_int = lane_model_b(lanerows,cstart,r0,crslope).astype(int)
+        observed_prob_band=np.array([pbandimg[r,c] if c<775 else 0 for r,c in zip(lanerows,predicted_cvals_int) ])
+        delta= np.ones((len(observed_prob_band))) - observed_prob_band
+        all_deltas.extend(delta)
+    #print(np.dot(all_deltas,all_deltas))
+    #print(np.dot(delta,delta))
+    return np.dot(all_deltas, all_deltas)
+#
 
+#this functino can probably be deleted! 1/12/19. Not used, use new_def_lws instead
 def define_lane_widths(lclusters):
     bandsize=3
     allrow_min=min(x.row_min for x in lclusters)
@@ -104,7 +232,7 @@ def define_lane_widths(lclusters):
             for rcpos,rc in enumerate(centerseg_tuples):
                 shiftband[rcpos,:]=[   gimg[centerseg_tuples[rcpos][0] ,centerseg_tuples[rcpos][1] + x + offset]     
                                      for x in range(-int((bandsize)/2),int(bandsize/2)+1)]
-            fracband=
+#            fracband=
             U,s,Vh=np.linalg.svd(shiftband)
             stuffs.append([U,s,Vh])
             #Udiff=U-Uc
@@ -204,7 +332,7 @@ class GelDG:
                 rowdistance=min(abs(curlc.row_max-curgb.rp.weighted_centroid[0]),
                                 abs(curlc.row_min-curgb.rp.weighted_centroid[0]))
                 if ol is not None:
-                    if ol>0.2 and rowdistance<(curlc.row_max-curlc.row_min):
+                    if ol>0.2 and rowdistance<0.75*(curlc.row_max-curlc.row_min):
                         curlc.gbs.add(curgb)
                         self.unclustered.pop(ucgbidx)
             curlc=LaneCluster(self.gel,curlc.gbs)
@@ -253,13 +381,19 @@ class gel_band:
         self.orthogline=None
         self.coord_tuples=None
         self.orthogline_tuples=None
+        self.intensityimage=gelimg
+        self.bprobspan=[]
+#        itensor=self.rp.inertia_tensor
+        ict_notnorm=self.rp.inertia_tensor[:,1]
+        self.norm_ict=ict_notnorm/np.linalg.norm(ict_notnorm)
+        self.norm_ict=np.array([-self.norm_ict[0],self.norm_ict[1]])
+        dval=ict_notnorm[0]/(-ict_notnorm[1])
+        self.ict_orthog_vector=np.array([1,dval])
+        self.norm_ict_orthog=self.ict_orthog_vector/np.linalg.norm(self.ict_orthog_vector)
 
-        itensor=self.rp.inertia_tensor
-        dval=itensor[0,1]/(-itensor[1,1])
-        ic_orthog_vector=np.array([1,dval])
         center_point=self.rp.weighted_centroid
-        numrows=gelimg.shape[0]
-        self.orthogline=[center_point[1]+(x-center_point[0])*(ic_orthog_vector[1]/ic_orthog_vector[0]) \
+        numrows=self.intensityimage.shape[0]
+        self.orthogline=[center_point[1]+(x-center_point[0])*(self.ict_orthog_vector[1]/self.ict_orthog_vector[0]) \
                 for x in range(numrows)]    
         self.coord_tuples=[tuple(x) for x in self.rp.coords]
         self.orthogline_tuples=[ (x, int(self.orthogline[x])) for x in range(numrows)]
@@ -279,29 +413,3 @@ class gel_band:
         else:
             return None
 
-
-def get_likelihood(lanes):
-    rate_term=2.0
-    sum_likelihood=0.0
-    for lidx,lane in enumerate(lanes):
-        for bidx,band in enumerate(lane.bands):
-            for olidx,olane in enumerate(lanes):
-                inlane_overlaps=0.1
-                outlane_overlaps=0.1
-                for obidx,oband in enumerate(olane.bands):
-                    if olidx==lidx and obidx==bidx:continue
-                    obandcoord_tuple=((x,y) for x,y in oband.regionprops.coords)
-                    bandcoord_tuple=((x,y) for x,y in band.regionprops.coords)
-                    frac_overlap1=len(band.band_extrap_set.intersection(obandcoord_tuple))/len(oband.regionprops.coords)
-                    frac_overlap2=len(oband.band_extrap_set.intersection(bandcoord_tuple))/len(band.regionprops.coords)
-                    frac_overlap=max(frac_overlap1,frac_overlap2)
-                    if lidx==olidx:
-                        inlane_overlaps+=frac_overlap
-                    else:
-                        outlane_overlaps+=frac_overlap
-                likelihood_band=1.0-np.exp(-rate_term*inlane_overlaps/(inlane_overlaps+outlane_overlaps))
-                sum_likelihood+=likelihood_band
-    return sum_likelihood
-#            
-#        for band in lane.bands:
-#
